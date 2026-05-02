@@ -3,7 +3,6 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
-const Anthropic = require('@anthropic-ai/sdk');
 
 const app = express();
 app.use(express.json());
@@ -12,20 +11,34 @@ app.use('/audio', express.static('tmp'));
 
 if (!fs.existsSync('tmp')) fs.mkdirSync('tmp');
 
-const anthropic = new Anthropic();
-
 // In-memory job store (use Redis for production)
 const jobs = {};
 
-// ─── Claude: generate Mike-style script ────────────────────────────────────────
+// ─── Backboard.io client ────────────────────────────────────────────────────────
 
-async function generateScript(todos) {
-  const todoText = todos.map((t, i) => `${i + 1}. ${t}`).join('\n');
+const BACKBOARD_BASE = 'https://app.backboard.io/api';
 
-  const msg = await anthropic.messages.create({
-    model: 'claude-opus-4-7',
-    max_tokens: 450,
-    system: `You are Mike Ehrmantraut from Breaking Bad and Better Call Saul. You have been hired to deliver a stranger's to-do list to them as direct orders. Speak in Mike's measured, gravelly, zero-tolerance voice.
+function bbHeaders() {
+  return { 'X-API-Key': process.env.BACKBOARD_API_KEY, 'Content-Type': 'application/json' };
+}
+
+async function bbPost(path, body) {
+  const res = await fetch(`${BACKBOARD_BASE}${path}`, {
+    method: 'POST', headers: bbHeaders(), body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`Backboard POST ${path}: ${res.status} — ${await res.text()}`);
+  return res.json();
+}
+
+async function bbGet(path) {
+  const res = await fetch(`${BACKBOARD_BASE}${path}`, { headers: { 'X-API-Key': process.env.BACKBOARD_API_KEY } });
+  if (!res.ok) throw new Error(`Backboard GET ${path}: ${res.status} — ${await res.text()}`);
+  return res.json();
+}
+
+// ─── Mike assistant — created once, reused across all sessions ─────────────────
+
+const MIKE_SYSTEM_PROMPT = `You are Mike Ehrmantraut from Breaking Bad and Better Call Saul. You have been hired to deliver people's to-do lists as direct orders. Speak in Mike's measured, gravelly, zero-tolerance voice.
 
 Rules:
 - ALWAYS open with exactly: "Here's what yer gonna do."
@@ -33,17 +46,62 @@ Rules:
 - No wasted words. Short, declarative sentences.
 - Dry, understated humor is fine. Sarcasm, never.
 - Imply consequences for failure without spelling them out
-- Occasionally call the listener "kid" (once max)
+- Occasionally call the listener "kid" (once max per briefing)
 - Keep the whole thing under 130 words
-- End with one of: "We clear?", "Get it done.", "Don't make me come back.", or "That's it."
-- Output ONLY the spoken monologue — no stage directions, no quotes, no labels`,
-    messages: [{
-      role: 'user',
-      content: `Here is the to-do list:\n\n${todoText}`
-    }]
+- End with exactly one of: "We clear?", "Get it done.", "Don't make me come back.", or "That's it."
+- Output ONLY the spoken monologue — no stage directions, no quotes, no labels`;
+
+// Cached in-process; persisted between restarts via BACKBOARD_ASSISTANT_ID env var
+let mikeAssistantId = process.env.BACKBOARD_ASSISTANT_ID || null;
+
+async function ensureMikeAssistant() {
+  if (mikeAssistantId) return mikeAssistantId;
+
+  // Check if we already created one
+  const list = await bbGet('/assistants');
+  const assistants = Array.isArray(list) ? list : (list.data || []);
+  const existing = assistants.find(a => a.name === 'Mike Ehrmantraut');
+
+  if (existing) {
+    mikeAssistantId = existing.id || existing.assistant_id;
+    console.log(`  Loaded existing Mike assistant: ${mikeAssistantId}`);
+    return mikeAssistantId;
+  }
+
+  // First run: create the assistant
+  const assistant = await bbPost('/assistants', {
+    name: 'Mike Ehrmantraut',
+    description: 'Delivers to-do lists as direct orders. No fluff. No wasted words.',
+    systemPrompt: MIKE_SYSTEM_PROMPT,
   });
 
-  return msg.content[0].text.trim();
+  mikeAssistantId = assistant.id || assistant.assistant_id;
+  console.log(`  Created Mike assistant: ${mikeAssistantId}`);
+  console.log(`  Tip: set BACKBOARD_ASSISTANT_ID=${mikeAssistantId} to skip this step on restart`);
+  return mikeAssistantId;
+}
+
+// ─── Script generation via Backboard.io ────────────────────────────────────────
+// Each briefing gets its own thread; memory="Auto" lets Backboard extract facts
+// across sessions so Mike can subtly acknowledge repeat customers.
+
+async function generateScript(todos) {
+  const assistantId = await ensureMikeAssistant();
+
+  const thread = await bbPost(`/assistants/${assistantId}/threads`, {});
+  const threadId = thread.thread_id || thread.threadId || thread.id;
+
+  const todoText = todos.map((t, i) => `${i + 1}. ${t}`).join('\n');
+
+  const response = await bbPost(`/threads/${threadId}/messages`, {
+    content: `Deliver this to-do list as a briefing:\n\n${todoText}`,
+    stream: false,
+    memory: 'Auto',
+    model_provider: 'anthropic',
+    model_name: 'claude-opus-4-7',
+  });
+
+  return (response.content || '').trim();
 }
 
 // ─── ElevenLabs: text → audio file ─────────────────────────────────────────────
@@ -202,6 +260,11 @@ app.get('/api/status/:jobId', (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`\n  Mike's waiting on port ${PORT}\n`);
-  console.log(`  Mode: ${process.env.D_ID_API_KEY ? 'VIDEO' : (process.env.ELEVENLABS_API_KEY ? 'AUDIO' : 'SCRIPT-ONLY')}\n`);
+  const mode = process.env.D_ID_API_KEY
+    ? 'VIDEO (Backboard → ElevenLabs → D-ID)'
+    : process.env.ELEVENLABS_API_KEY
+    ? 'AUDIO (Backboard → ElevenLabs)'
+    : 'SCRIPT-ONLY (Backboard)';
+  console.log(`\n  Mike's waiting on port ${PORT}`);
+  console.log(`  Mode: ${mode}\n`);
 });
