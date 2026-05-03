@@ -30,6 +30,19 @@ async function bbPost(path, body) {
   return res.json();
 }
 
+// Messages endpoint uses multipart/form-data, not JSON
+async function bbPostForm(path, fields) {
+  const form = new FormData();
+  for (const [k, v] of Object.entries(fields)) form.append(k, String(v));
+  const res = await fetch(`${BACKBOARD_BASE}${path}`, {
+    method: 'POST',
+    headers: { 'X-API-Key': process.env.BACKBOARD_API_KEY }, // no Content-Type: let fetch set boundary
+    body: form,
+  });
+  if (!res.ok) throw new Error(`Backboard POST ${path}: ${res.status} — ${await res.text()}`);
+  return res.json();
+}
+
 async function bbGet(path) {
   const res = await fetch(`${BACKBOARD_BASE}${path}`, { headers: { 'X-API-Key': process.env.BACKBOARD_API_KEY } });
   if (!res.ok) throw new Error(`Backboard GET ${path}: ${res.status} — ${await res.text()}`);
@@ -63,7 +76,7 @@ async function ensureMikeAssistant() {
   const existing = assistants.find(a => a.name === 'Mike Ehrmantraut');
 
   if (existing) {
-    mikeAssistantId = existing.id || existing.assistant_id;
+    mikeAssistantId = existing.assistant_id || existing.id;
     console.log(`  Loaded existing Mike assistant: ${mikeAssistantId}`);
     return mikeAssistantId;
   }
@@ -72,10 +85,10 @@ async function ensureMikeAssistant() {
   const assistant = await bbPost('/assistants', {
     name: 'Mike Ehrmantraut',
     description: 'Delivers to-do lists as direct orders. No fluff. No wasted words.',
-    systemPrompt: MIKE_SYSTEM_PROMPT,
+    system_prompt: MIKE_SYSTEM_PROMPT, // snake_case confirmed from API schema
   });
 
-  mikeAssistantId = assistant.id || assistant.assistant_id;
+  mikeAssistantId = assistant.assistant_id || assistant.id;
   console.log(`  Created Mike assistant: ${mikeAssistantId}`);
   console.log(`  Tip: set BACKBOARD_ASSISTANT_ID=${mikeAssistantId} to skip this step on restart`);
   return mikeAssistantId;
@@ -89,13 +102,14 @@ async function generateScript(todos) {
   const assistantId = await ensureMikeAssistant();
 
   const thread = await bbPost(`/assistants/${assistantId}/threads`, {});
-  const threadId = thread.thread_id || thread.threadId || thread.id;
+  const threadId = thread.thread_id || thread.id;
 
   const todoText = todos.map((t, i) => `${i + 1}. ${t}`).join('\n');
 
-  const response = await bbPost(`/threads/${threadId}/messages`, {
+  // Messages endpoint is multipart/form-data
+  const response = await bbPostForm(`/threads/${threadId}/messages`, {
     content: `Deliver this to-do list as a briefing:\n\n${todoText}`,
-    stream: false,
+    stream: 'false',
     memory: 'Auto',
     model_provider: 'anthropic',
     model_name: 'claude-opus-4-7',
