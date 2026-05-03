@@ -208,6 +208,7 @@ async function runPipeline(jobId, todos) {
     // 1. Script
     update({ step: 'script', stepLabel: 'Mike is assessing the situation…' });
     const script = await generateScript(todos);
+    if (!script) throw new Error('Got an empty response from Backboard — try again.');
     update({ script });
 
     // 2. Audio
