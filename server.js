@@ -30,18 +30,6 @@ async function bbPost(path, body) {
   return res.json();
 }
 
-// Messages endpoint uses multipart/form-data, not JSON
-async function bbPostForm(path, fields) {
-  const form = new FormData();
-  for (const [k, v] of Object.entries(fields)) form.append(k, String(v));
-  const res = await fetch(`${BACKBOARD_BASE}${path}`, {
-    method: 'POST',
-    headers: { 'X-API-Key': process.env.BACKBOARD_API_KEY }, // no Content-Type: let fetch set boundary
-    body: form,
-  });
-  if (!res.ok) throw new Error(`Backboard POST ${path}: ${res.status} — ${await res.text()}`);
-  return res.json();
-}
 
 async function bbGet(path) {
   const res = await fetch(`${BACKBOARD_BASE}${path}`, { headers: { 'X-API-Key': process.env.BACKBOARD_API_KEY } });
@@ -106,13 +94,14 @@ async function generateScript(todos) {
 
   const todoText = todos.map((t, i) => `${i + 1}. ${t}`).join('\n');
 
-  // Messages endpoint is multipart/form-data
-  const response = await bbPostForm(`/threads/${threadId}/messages`, {
+  // Messages endpoint: POST /threads/messages (JSON), thread_id in body
+  const response = await bbPost(`/threads/messages`, {
+    thread_id: threadId,
     content: `Deliver this to-do list as a briefing:\n\n${todoText}`,
-    stream: 'false',
+    stream: false,
     memory: 'Auto',
-    model_provider: 'anthropic',
-    model_name: 'claude-opus-4-7',
+    llm_provider: 'anthropic',
+    model_name: 'claude-3-5-sonnet-20241022',
   });
 
   return (response.content || '').trim();
